@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	"github.com/google/go-containerregistry/internal/redact"
 	"github.com/google/go-containerregistry/internal/retry"
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -36,6 +38,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"github.com/google/go-containerregistry/pkg/v1/stream"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // Taggable is an interface that enables a manifest PUT (e.g. for tagging).
@@ -74,6 +78,8 @@ type writer struct {
 }
 
 func makeWriter(ctx context.Context, repo name.Repository, ls []v1.Layer, o *options) (*writer, error) {
+	newCtx, span := otel.GetTracerProvider().Tracer("remote").Start(ctx, "makeWriter")
+	defer span.End()
 	auth := o.auth
 	if o.keychain != nil {
 		kauth, err := o.keychain.Resolve(repo)
@@ -83,7 +89,7 @@ func makeWriter(ctx context.Context, repo name.Repository, ls []v1.Layer, o *opt
 		auth = kauth
 	}
 	scopes := scopesForUploadingImage(repo, ls)
-	tr, err := transport.NewWithContext(ctx, repo.Registry, auth, o.transport, scopes)
+	tr, err := transport.NewWithContext(newCtx, repo.Registry, auth, o.transport, scopes)
 	if err != nil {
 		return nil, err
 	}
@@ -92,6 +98,7 @@ func makeWriter(ctx context.Context, repo name.Repository, ls []v1.Layer, o *opt
 	for _, scope := range scopes {
 		scopeSet[scope] = struct{}{}
 	}
+	span.SetAttributes(attribute.String("repo", repo.RepositoryStr()), attribute.StringSlice("scopes", scopes))
 	return &writer{
 		repo:      repo,
 		client:    &http.Client{Transport: tr},
@@ -115,6 +122,8 @@ func (w *writer) url(path string) url.URL {
 }
 
 func (w *writer) maybeUpdateScopes(ctx context.Context, ml *MountableLayer) error {
+	newCtx, span := otel.GetTracerProvider().Tracer("remote").Start(ctx, "writer.maybeUpdateScopes")
+	defer span.End()
 	if ml.Reference.Context().String() == w.repo.String() {
 		return nil
 	}
@@ -132,11 +141,11 @@ func (w *writer) maybeUpdateScopes(ctx context.Context, ml *MountableLayer) erro
 		w.scopes = append(w.scopes, scope)
 
 		logs.Debug.Printf("Refreshing token to add scope %q", scope)
-		wt, err := transport.NewWithContext(ctx, w.repo.Registry, w.auth, w.transport, w.scopes)
+		wt, err := transport.NewWithContext(newCtx, w.repo.Registry, w.auth, w.transport, w.scopes)
 		if err != nil {
 			return err
 		}
-		w.client = &http.Client{Transport: wt}
+		w.client = &http.Client{Transport: otelhttp.NewTransport(wt)}
 	}
 
 	return nil
@@ -163,6 +172,8 @@ func (w *writer) nextLocation(resp *http.Response) (string, error) {
 // initiation if "mount" is specified, even if no "from" sources are specified.
 // However, this is not broadly applicable to all registries, e.g. ECR.
 func (w *writer) checkExistingBlob(ctx context.Context, h v1.Hash) (bool, error) {
+	newCtx, span := otel.GetTracerProvider().Tracer("remote").Start(ctx, "writer.checkExistingBlob")
+	defer span.End()
 	u := w.url(fmt.Sprintf("/v2/%s/blobs/%s", w.repo.RepositoryStr(), h.String()))
 
 	req, err := http.NewRequest(http.MethodHead, u.String(), nil)
@@ -170,7 +181,7 @@ func (w *writer) checkExistingBlob(ctx context.Context, h v1.Hash) (bool, error)
 		return false, err
 	}
 
-	resp, err := w.client.Do(req.WithContext(ctx))
+	resp, err := w.client.Do(req.WithContext(newCtx))
 	if err != nil {
 		return false, err
 	}
@@ -190,6 +201,8 @@ func (w *writer) checkExistingBlob(ctx context.Context, h v1.Hash) (bool, error)
 // upload was initiated and the body of that blob should be sent to the returned
 // location.
 func (w *writer) initiateUpload(ctx context.Context, from, mount, origin string) (location string, mounted bool, err error) {
+	newCtx, span := otel.GetTracerProvider().Tracer("remote").Start(ctx, "writer.initiateUpload")
+	defer span.End()
 	u := w.url(fmt.Sprintf("/v2/%s/blobs/uploads/", w.repo.RepositoryStr()))
 	uv := url.Values{}
 	if mount != "" && from != "" {
@@ -208,12 +221,12 @@ func (w *writer) initiateUpload(ctx context.Context, from, mount, origin string)
 		return "", false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := w.client.Do(req.WithContext(ctx))
+	resp, err := w.client.Do(req.WithContext(newCtx))
 	if err != nil {
 		if origin != "" && origin != w.repo.RegistryStr() {
 			// https://github.com/google/go-containerregistry/issues/1679
 			logs.Warn.Printf("retrying without mount: %v", err)
-			return w.initiateUpload(ctx, "", "", "")
+			return w.initiateUpload(newCtx, "", "", "")
 		}
 		return "", false, err
 	}
@@ -223,7 +236,7 @@ func (w *writer) initiateUpload(ctx context.Context, from, mount, origin string)
 		if origin != "" && origin != w.repo.RegistryStr() {
 			// https://github.com/google/go-containerregistry/issues/1404
 			logs.Warn.Printf("retrying without mount: %v", err)
-			return w.initiateUpload(ctx, "", "", "")
+			return w.initiateUpload(newCtx, "", "", "")
 		}
 		return "", false, err
 	}
@@ -246,6 +259,8 @@ func (w *writer) initiateUpload(ctx context.Context, from, mount, origin string)
 // On failure, this will return an error.  On success, this will return the location
 // header indicating how to commit the streamed blob.
 func (w *writer) streamBlob(ctx context.Context, layer v1.Layer, streamLocation string) (commitLocation string, rerr error) {
+	newCtx, span := otel.GetTracerProvider().Tracer("remote").Start(ctx, "writer.streamBlob")
+	defer span.End()
 	reset := func() {}
 	defer func() {
 		if rerr != nil {
@@ -283,7 +298,7 @@ func (w *writer) streamBlob(ctx context.Context, layer v1.Layer, streamLocation 
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	resp, err := w.client.Do(req.WithContext(ctx))
+	resp, err := w.client.Do(req.WithContext(newCtx))
 	if err != nil {
 		return "", err
 	}
@@ -334,13 +349,15 @@ func (w *writer) incrProgress(written int64) {
 
 // uploadOne performs a complete upload of a single layer.
 func (w *writer) uploadOne(ctx context.Context, l v1.Layer) error {
+	newCtx, span := otel.GetTracerProvider().Tracer("remote").Start(ctx, "writer.uploadOne")
+	defer span.End()
 	tryUpload := func() error {
-		ctx := retry.Never(ctx)
+		ctx := retry.Never(newCtx)
 		var from, mount, origin string
 		if h, err := l.Digest(); err == nil {
 			// If we know the digest, this isn't a streaming layer. Do an existence
 			// check so we can skip uploading the layer if possible.
-			existing, err := w.checkExistingBlob(ctx, h)
+			existing, err := w.checkExistingBlob(newCtx, h)
 			if err != nil {
 				return err
 			}
@@ -357,7 +374,7 @@ func (w *writer) uploadOne(ctx context.Context, l v1.Layer) error {
 			mount = h.String()
 		}
 		if ml, ok := l.(*MountableLayer); ok {
-			if err := w.maybeUpdateScopes(ctx, ml); err != nil {
+			if err := w.maybeUpdateScopes(newCtx, ml); err != nil {
 				return err
 			}
 			from = ml.Reference.Context().RepositoryStr()
@@ -389,10 +406,10 @@ func (w *writer) uploadOne(ctx context.Context, l v1.Layer) error {
 		}
 		smt := string(mt)
 		if !(strings.HasSuffix(smt, "+json") || strings.HasSuffix(smt, "+yaml")) {
-			ctx = redact.NewContext(ctx, "omitting binary blobs from logs")
+			newCtx = redact.NewContext(newCtx, "omitting binary blobs from logs")
 		}
 
-		location, err = w.streamBlob(ctx, l, location)
+		location, err = w.streamBlob(newCtx, l, location)
 		if err != nil {
 			return err
 		}

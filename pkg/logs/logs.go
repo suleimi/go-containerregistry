@@ -18,17 +18,18 @@ package logs
 import (
 	"io"
 	"log"
+	"os"
 )
 
 var (
 	// Warn is used to log non-fatal errors.
-	Warn = log.New(io.Discard, "", log.LstdFlags)
+	Warn = log.New(os.Stdout, "", log.LstdFlags)
 
 	// Progress is used to log notable, successful events.
-	Progress = log.New(io.Discard, "", log.LstdFlags)
+	Progress = log.New(os.Stdout, "", log.LstdFlags)
 
 	// Debug is used to log information that is useful for debugging.
-	Debug = log.New(io.Discard, "", log.LstdFlags)
+	Debug = log.New(os.Stdout, "", log.LstdFlags)
 )
 
 // Enabled checks to see if the logger's writer is set to something other

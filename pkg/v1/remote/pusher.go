@@ -30,6 +30,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"github.com/google/go-containerregistry/pkg/v1/stream"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+	"go.opentelemetry.io/otel"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -117,16 +118,20 @@ func newPusher(o *options) *Pusher {
 }
 
 func (p *Pusher) writer(ctx context.Context, repo name.Repository, o *options) (*repoWriter, error) {
+	newCtx, span := otel.GetTracerProvider().Tracer("remote").Start(ctx, "Pusher.writer")
+	defer span.End()
 	v, _ := p.writers.LoadOrStore(repo, &repoWriter{
 		repo: repo,
 		o:    o,
 	})
 	rw := v.(*repoWriter)
-	return rw, rw.init(ctx)
+	return rw, rw.init(newCtx)
 }
 
 func (p *Pusher) Push(ctx context.Context, ref name.Reference, t Taggable) error {
-	w, err := p.writer(ctx, ref.Context(), p.o)
+	newCtx, span := otel.GetTracerProvider().Tracer("remote").Start(ctx, "Pusher.Push")
+	defer span.End()
+	w, err := p.writer(newCtx, ref.Context(), p.o)
 	if err != nil {
 		return err
 	}
@@ -184,20 +189,24 @@ type repoWriter struct {
 
 // this will run once per repoWriter instance
 func (rw *repoWriter) init(ctx context.Context) error {
+	newCtx, span := otel.GetTracerProvider().Tracer("remote").Start(ctx, "repoWriter.init")
+	defer span.End()
 	rw.once.Do(func() {
 		rw.work = &workers{}
-		rw.w, rw.err = makeWriter(ctx, rw.repo, nil, rw.o)
+		rw.w, rw.err = makeWriter(newCtx, rw.repo, nil, rw.o)
 	})
 	return rw.err
 }
 
 func (rw *repoWriter) writeDeps(ctx context.Context, m manifest) error {
+	newCtx, span := otel.GetTracerProvider().Tracer("remote").Start(ctx, "repoWriter.writeDeps")
+	defer span.End()
 	if img, ok := m.(v1.Image); ok {
-		return rw.writeLayers(ctx, img)
+		return rw.writeLayers(newCtx, img)
 	}
 
 	if idx, ok := m.(v1.ImageIndex); ok {
-		return rw.writeChildren(ctx, idx)
+		return rw.writeChildren(newCtx, idx)
 	}
 
 	// This has no deps, not an error (e.g. something you want to just PUT).
@@ -272,6 +281,8 @@ func taggableToManifest(t Taggable) (manifest, error) {
 }
 
 func (rw *repoWriter) writeManifest(ctx context.Context, ref name.Reference, t Taggable) error {
+	newCtx, span := otel.GetTracerProvider().Tracer("remote").Start(ctx, "repoWriter.writeManifest")
+	defer span.End()
 	m, err := taggableToManifest(t)
 	if err != nil {
 		return err
@@ -281,7 +292,7 @@ func (rw *repoWriter) writeManifest(ctx context.Context, ref name.Reference, t T
 
 	digest, err := m.Digest()
 	if errors.Is(err, stream.ErrNotComputed) {
-		if err := rw.writeDeps(ctx, m); err != nil {
+		if err := rw.writeDeps(newCtx, m); err != nil {
 			return err
 		}
 
@@ -304,7 +315,7 @@ func (rw *repoWriter) writeManifest(ctx context.Context, ref name.Reference, t T
 	// we don't want to dedupe based on the manifest digest.
 	_, byTag := ref.(name.Tag)
 	if byTag {
-		if exists, err := rw.manifestExists(ctx, ref, t); err != nil {
+		if exists, err := rw.manifestExists(newCtx, ref, t); err != nil {
 			return err
 		} else if exists {
 			return nil
@@ -317,7 +328,7 @@ func (rw *repoWriter) writeManifest(ctx context.Context, ref name.Reference, t T
 
 	if err := rw.work.Do(digest, func() error {
 		if !byTag {
-			if exists, err := rw.manifestExists(ctx, ref, t); err != nil {
+			if exists, err := rw.manifestExists(newCtx, ref, t); err != nil {
 				return err
 			} else if exists {
 				return nil
@@ -325,13 +336,13 @@ func (rw *repoWriter) writeManifest(ctx context.Context, ref name.Reference, t T
 		}
 
 		if needDeps {
-			if err := rw.writeDeps(ctx, m); err != nil {
+			if err := rw.writeDeps(newCtx, m); err != nil {
 				return err
 			}
 		}
 
 		needPut = false
-		return rw.commitManifest(ctx, ref, m)
+		return rw.commitManifest(newCtx, ref, m)
 	}); err != nil {
 		return err
 	}
@@ -341,7 +352,7 @@ func (rw *repoWriter) writeManifest(ctx context.Context, ref name.Reference, t T
 	}
 
 	// Only runs for tags that got deduped by digest.
-	return rw.commitManifest(ctx, ref, m)
+	return rw.commitManifest(newCtx, ref, m)
 }
 
 func (rw *repoWriter) writeChildren(ctx context.Context, idx v1.ImageIndex) error {
@@ -454,12 +465,14 @@ func (rw *repoWriter) commitManifest(ctx context.Context, ref name.Reference, m 
 }
 
 func (rw *repoWriter) writeLayers(pctx context.Context, img v1.Image) error {
+	newCtx, span := otel.GetTracerProvider().Tracer("remote").Start(pctx, "repoWriter.writeLayers")
+	defer span.End()
 	ls, err := img.Layers()
 	if err != nil {
 		return err
 	}
 
-	g, ctx := errgroup.WithContext(pctx)
+	g, ctx := errgroup.WithContext(newCtx)
 	g.SetLimit(rw.o.jobs)
 
 	for _, l := range ls {
@@ -503,6 +516,8 @@ func (rw *repoWriter) writeLayers(pctx context.Context, img v1.Image) error {
 }
 
 func (rw *repoWriter) writeLayer(ctx context.Context, l v1.Layer) error {
+	newCtx, span := otel.GetTracerProvider().Tracer("remote").Start(ctx, "repoWriter.writeLayer")
+	defer span.End()
 	// Skip any non-distributable things.
 	mt, err := l.MediaType()
 	if err != nil {
@@ -515,7 +530,7 @@ func (rw *repoWriter) writeLayer(ctx context.Context, l v1.Layer) error {
 	digest, err := l.Digest()
 	if err != nil {
 		if errors.Is(err, stream.ErrNotComputed) {
-			return rw.lazyWriteLayer(ctx, l)
+			return rw.lazyWriteLayer(newCtx, l)
 		}
 		return err
 	}
@@ -533,8 +548,10 @@ func (rw *repoWriter) writeLayer(ctx context.Context, l v1.Layer) error {
 }
 
 func (rw *repoWriter) lazyWriteLayer(ctx context.Context, l v1.Layer) error {
+	newCtx, span := otel.GetTracerProvider().Tracer("remote").Start(ctx, "repoWriter.lazyWriteLayer")
+	defer span.End()
 	return rw.work.Stream(l, func() error {
-		if err := rw.w.uploadOne(ctx, l); err != nil {
+		if err := rw.w.uploadOne(newCtx, l); err != nil {
 			return err
 		}
 
