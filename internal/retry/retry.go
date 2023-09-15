@@ -68,7 +68,9 @@ func Retry(f func() error, p Predicate, backoff wait.Backoff) (err error) {
 
 	condition := func() (bool, error) {
 		err = f()
-		logs.Warn.Printf("This Network Error was hidden before: %s", err)
+		if err != nil {
+			logs.Warn.Printf("This Network Error was hidden before: %s", err)
+		}
 		if p(err) {
 			return false, nil
 		}

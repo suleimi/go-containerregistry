@@ -291,8 +291,8 @@ func (w *writer) streamBlob(ctx context.Context, layer v1.Layer, streamLocation 
 		}
 	}
 	clientTrace := otelhttptrace.NewClientTrace(newCtx)
-	newCtx = httptrace.WithClientTrace(newCtx, clientTrace)
-	req, err := http.NewRequestWithContext(newCtx, http.MethodPatch, streamLocation, blob)
+	newCtx2 := httptrace.WithClientTrace(newCtx, clientTrace)
+	req, err := http.NewRequestWithContext(newCtx2, http.MethodPatch, streamLocation, blob)
 	if err != nil {
 		return "", err
 	}
