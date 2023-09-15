@@ -22,6 +22,8 @@ import (
 	"errors"
 	"math/rand"
 	"time"
+
+	"github.com/google/go-containerregistry/pkg/logs"
 )
 
 // Jitter returns a time.Duration between duration and duration + maxFactor *
@@ -117,7 +119,9 @@ func ExponentialBackoff(backoff Backoff, condition ConditionFunc) error {
 		if backoff.Steps == 1 {
 			break
 		}
-		time.Sleep(backoff.Step())
+		backoff := backoff.Step()
+		logs.Warn.Printf("Backing off for: %v", backoff)
+		time.Sleep(backoff)
 	}
 	return ErrWaitTimeout
 }

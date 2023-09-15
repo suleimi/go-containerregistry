@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	"github.com/google/go-containerregistry/internal/retry/wait"
+	"github.com/google/go-containerregistry/pkg/logs"
 )
 
 // Backoff is an alias of our own wait.Backoff to avoid name conflicts with
@@ -67,6 +68,7 @@ func Retry(f func() error, p Predicate, backoff wait.Backoff) (err error) {
 
 	condition := func() (bool, error) {
 		err = f()
+		logs.Warn.Printf("This Network Error was hidden before: %s", err)
 		if p(err) {
 			return false, nil
 		}

@@ -27,6 +27,9 @@ import (
 	"strings"
 	"sync"
 
+	"net/http/httptrace"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/google/go-containerregistry/internal/redact"
@@ -287,8 +290,9 @@ func (w *writer) streamBlob(ctx context.Context, layer v1.Layer, streamLocation 
 			w.progress.complete(-count)
 		}
 	}
-
-	req, err := http.NewRequest(http.MethodPatch, streamLocation, blob)
+	clientTrace := otelhttptrace.NewClientTrace(newCtx)
+	newCtx = httptrace.WithClientTrace(newCtx, clientTrace)
+	req, err := http.NewRequestWithContext(newCtx, http.MethodPatch, streamLocation, blob)
 	if err != nil {
 		return "", err
 	}
